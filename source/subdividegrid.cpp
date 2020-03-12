@@ -1,6 +1,7 @@
 #include "subdividegrid.h"
 #include "c4d_symbols.h"
 #include "customgui_splinecontrol.h"
+#include "customgui_inexclude.h"
 
 using namespace maxon;
 
@@ -40,6 +41,16 @@ inline Vector MaxVector(Vector a, Vector b)
   return newVec;
 }
 
+inline Vector roundOffVector(Vector in)
+{
+  Vector out;
+  Float per = 10000;
+  out.x = maxon::Floor(in.x * per + 0.5) / per;
+  out.y = maxon::Floor(in.y * per + 0.5) / per;
+  out.z = maxon::Floor(in.z * per + 0.5) / per;
+  return out;
+}
+
 //
 // MARK: Classes
 //
@@ -70,6 +81,18 @@ Bool SubdivideGrid::GetDDescription(GeListNode* node, Description* description, 
     bc.SetFloat(DESC_STEP, 0.01f);
     bc.SetBool(DESC_GUIOPEN, true);
     if (!description->SetParameter(completeID, bc, ID_TAGPROPERTIES))
+      return false;
+  }
+  
+  // Add list control
+  DescID listID = DescLevel(ID_SG_LIST, CUSTOMDATATYPE_INEXCLUDE_LIST, 0);
+  if (!singleID || listID.IsPartOf(*singleID, nullptr))
+  {
+    BaseContainer bc = GetCustomDataTypeDefault(CUSTOMDATATYPE_INEXCLUDE_LIST);
+    bc.SetString(DESC_NAME, "Splines"_s);
+    bc.SetString(DESC_SHORT_NAME, "Splines"_s);
+    bc.SetBool(DESC_GUIOPEN, true);
+    if (!description->SetParameter(listID, bc, ID_TAGPROPERTIES))
       return false;
   }
 
@@ -169,11 +192,26 @@ Bool SubdivideGrid::Init(GeListNode* node)
   return true;
 }
 
+Bool SubdivideGrid::Message(GeListNode *node, Int32 type, void *data)
+{
+  if (type == MSG_DESCRIPTION_CHECKDRAGANDDROP)
+  {
+    DescriptionCheckDragAndDrop *dcu = (DescriptionCheckDragAndDrop*)data;
+    switch (dcu->_descId[0].id)
+    {
+      case ID_SG_LIST:
+        dcu->_result = dcu->_element->IsInstanceOf(Obase);
+        return true;
+    }
+  }
+  return true;
+};
+
 Bool SubdivideGrid::GetBBox(BaseObject *obj, BaseArray<Vector> &bbox)
 {
   iferr_scope_handler { return false; };
   Vector rad = obj->GetRad();
-  Vector center = (obj->GetUpMg() * obj->GetRelPos()) + obj->GetMp();
+  Vector center = roundOffVector((obj->GetUpMg() * obj->GetRelPos()) + obj->GetMp());
   bbox.Append(center - rad) iferr_return;
   bbox.Append(center + rad) iferr_return;
   return true;
@@ -188,7 +226,7 @@ Bool SubdivideGrid::GetCollectiveBBox(BaseArray<BaseObject *> &objects, BaseArra
   {
     GetBBox(objects[x], tmp);
     bbox[0] = MinVector(bbox[0], tmp[0]);
-    bbox[1] = MinVector(bbox[1], tmp[1]);
+    bbox[1] = MaxVector(bbox[1], tmp[1]);
     tmp.Reset();
   }
   return true;
@@ -242,6 +280,10 @@ EXECUTIONRESULT SubdivideGrid::Execute(BaseTag* tag, BaseDocument* doc, BaseObje
   tag->GetParameter(DescID(ID_SG_COMPLETE), completeData, DESCFLAGS_GET::NONE);
   Float complete = completeData.GetFloat();
   
+  GeData listData(CUSTOMDATATYPE_INEXCLUDE_LIST);
+  tag->GetParameter(DescID(ID_SG_LIST), listData, DESCFLAGS_GET::NONE);
+  InExcludeData *splineList = (InExcludeData *)listData.GetCustomDataType(CUSTOMDATATYPE_INEXCLUDE_LIST);
+  
   GeData sxData(CUSTOMDATATYPE_SPLINE);
   tag->GetParameter(DescID(ID_SG_SPLINE_X), sxData, DESCFLAGS_GET::NONE);
   SplineData *splineX = (SplineData *)sxData.GetCustomDataType(CUSTOMDATATYPE_SPLINE);
@@ -255,13 +297,20 @@ EXECUTIONRESULT SubdivideGrid::Execute(BaseTag* tag, BaseDocument* doc, BaseObje
   SplineData *splineZ = (SplineData *)szData.GetCustomDataType(CUSTOMDATATYPE_SPLINE);
   
   // collect splines
-  // if nothing in list, get children
   BaseArray<BaseObject *> splines;
-  BaseObject *child = op->GetDown();
-  while (child)
+  for (Int x = 0; x < splineList->GetObjectCount(); x += 1)
   {
-    splines.Append(child) iferr_return;
-    child = child->GetNext();
+    splines.Append((BaseObject *)splineList->ObjectFromIndex(doc, x)) iferr_return;
+  }
+  // if nothing in list, get children
+  if (splines.GetCount() == 0)
+  {
+    BaseObject *child = op->GetDown();
+    while (child)
+    {
+      splines.Append(child) iferr_return;
+      child = child->GetNext();
+    }
   }
 
   if (splines.GetCount() == 0)
@@ -304,9 +353,9 @@ EXECUTIONRESULT SubdivideGrid::Execute(BaseTag* tag, BaseDocument* doc, BaseObje
         maxScaleOff.z = parentRad.z / splineRad.z;
 
     Vector scaleOff(1.0f);
-    scaleOff.x = MapRange(complete, 1.0f, 0.0f, 1.0f, maxScaleOff.x, splineX);
-    scaleOff.y = MapRange(complete, 1.0f, 0.0f, 1.0f, maxScaleOff.y, splineY);
-    scaleOff.z = MapRange(complete, 1.0f, 0.0f, 1.0f, maxScaleOff.z, splineZ);
+    scaleOff.x = MapRange(complete, 0.0f, 1.0f, maxScaleOff.x, 1.0f, splineX);
+    scaleOff.y = MapRange(complete, 0.0f, 1.0f, maxScaleOff.y, 1.0f, splineY);
+    scaleOff.z = MapRange(complete, 0.0f, 1.0f, maxScaleOff.z, 1.0f, splineZ);
 
     // position
     Vector splineRelPos = spline->GetRelPos();
@@ -339,9 +388,9 @@ EXECUTIONRESULT SubdivideGrid::Execute(BaseTag* tag, BaseDocument* doc, BaseObje
 
 
     Vector posOff(0);
-    posOff.x = MapRange(complete, 1.0f, 0.0f, 0.0f, maxPosOff.x, splineX);
-    posOff.y = MapRange(complete, 1.0f, 0.0f, 0.0f, maxPosOff.y, splineY);
-    posOff.z = MapRange(complete, 1.0f, 0.0f, 0.0f, maxPosOff.z, splineZ);
+    posOff.x = MapRange(complete, 0.0f, 1.0f, maxPosOff.x, 0.0f, splineX);
+    posOff.y = MapRange(complete, 0.0f, 1.0f, maxPosOff.y, 0.0f, splineY);
+    posOff.z = MapRange(complete, 0.0f, 1.0f, maxPosOff.z, 0.0f, splineZ);
 
     // apply
     spline->SetFrozenPos(posOff);
