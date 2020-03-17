@@ -9,10 +9,10 @@ using namespace maxon;
 // MARK: Helper Functions
 //
 
-inline Float32 MapRange(Float32 value, Float32 min_input, Float32 max_input, Float32 min_output, Float32 max_output, SplineData *curve = NULL)
+inline Float MapRange(Float value, Float min_input, Float max_input, Float min_output, Float max_output, SplineData *curve = NULL)
 {
-  Float32 inrange = max_input - min_input;
-  if (CompareFloatTolerant(inrange, 0.0f))
+  Float inrange = max_input - min_input;
+  if (CompareFloatTolerant(SafeConvert<Float64>(inrange), SafeConvert<Float64>(0.0f)))
     value = 0.0f; // Prevent DivByZero error
   else
     value = (value - min_input) / inrange; // Map input range to [0.0 ... 1.0]
@@ -54,6 +54,42 @@ inline Vector roundOffVector(Vector in)
 //
 // MARK: Classes
 //
+
+Bool SubdivideGrid::Init(GeListNode* node)
+{
+  BaseTag *tag = (BaseTag *)node;
+  BaseContainer *bc = tag->GetDataInstance();
+  
+  // complete control
+  bc->SetFloat(ID_SG_COMPLETE, 1.0f);
+  
+  // list control
+  GeData listData(CUSTOMDATATYPE_INEXCLUDE_LIST, DEFAULTVALUE);
+  bc->SetData(ID_SG_LIST, listData);
+
+  // spline x
+  GeData splineDataX(CUSTOMDATATYPE_SPLINE, DEFAULTVALUE);
+  SplineData *sx = (SplineData *)splineDataX.GetCustomDataType(CUSTOMDATATYPE_SPLINE);
+  if (sx)
+    sx->MakeLinearSplineBezier(2);
+  bc->SetData(ID_SG_SPLINE_X, splineDataX);
+  
+  // spline y
+  GeData splineDataY(CUSTOMDATATYPE_SPLINE, DEFAULTVALUE);
+  SplineData *sy = (SplineData *)splineDataY.GetCustomDataType(CUSTOMDATATYPE_SPLINE);
+  if (sy)
+    sy->MakeLinearSplineBezier(2);
+  bc->SetData(ID_SG_SPLINE_Y, splineDataY);
+  
+  // spline z
+  GeData splineDataZ(CUSTOMDATATYPE_SPLINE, DEFAULTVALUE);
+  SplineData *sz = (SplineData *)splineDataZ.GetCustomDataType(CUSTOMDATATYPE_SPLINE);
+  if (sz)
+    sz->MakeLinearSplineBezier(2);
+  bc->SetData(ID_SG_SPLINE_Z, splineDataZ);
+  
+  return true;
+}
 
 Bool SubdivideGrid::GetDDescription(GeListNode* node, Description* description, DESCFLAGS_DESC& flags)
 {
@@ -160,38 +196,6 @@ Bool SubdivideGrid::GetDDescription(GeListNode* node, Description* description, 
   return true;
 }
 
-Bool SubdivideGrid::Init(GeListNode* node)
-{
-  BaseTag *tag = (BaseTag *)node;
-  BaseContainer *bc = tag->GetDataInstance();
-  
-  // complete control
-  bc->SetFloat(ID_SG_COMPLETE, 1.0f);
-
-  // spline x
-  GeData splineDataX(CUSTOMDATATYPE_SPLINE, DEFAULTVALUE);
-  SplineData *sx = (SplineData *)splineDataX.GetCustomDataType(CUSTOMDATATYPE_SPLINE);
-  if (sx)
-    sx->MakeLinearSplineBezier(2);
-  bc->SetData(ID_SG_SPLINE_X, splineDataX);
-  
-  // spline y
-  GeData splineDataY(CUSTOMDATATYPE_SPLINE, DEFAULTVALUE);
-  SplineData *sy = (SplineData *)splineDataY.GetCustomDataType(CUSTOMDATATYPE_SPLINE);
-  if (sy)
-    sy->MakeLinearSplineBezier(2);
-  bc->SetData(ID_SG_SPLINE_Y, splineDataY);
-  
-  // spline z
-  GeData splineDataZ(CUSTOMDATATYPE_SPLINE, DEFAULTVALUE);
-  SplineData *sz = (SplineData *)splineDataZ.GetCustomDataType(CUSTOMDATATYPE_SPLINE);
-  if (sz)
-    sz->MakeLinearSplineBezier(2);
-  bc->SetData(ID_SG_SPLINE_Z, splineDataZ);
-  
-  return true;
-}
-
 Bool SubdivideGrid::Message(GeListNode *node, Int32 type, void *data)
 {
   if (type == MSG_DESCRIPTION_CHECKDRAGANDDROP)
@@ -211,9 +215,21 @@ Bool SubdivideGrid::GetBBox(BaseObject *obj, BaseArray<Vector> &bbox)
 {
   iferr_scope_handler { return false; };
   Vector rad = obj->GetRad();
-  Vector center = roundOffVector((obj->GetUpMg() * obj->GetRelPos()) + obj->GetMp());
-  bbox.Append(center - rad) iferr_return;
-  bbox.Append(center + rad) iferr_return;
+  if (CompareFloatTolerant(rad.GetLength(), 0.0_f) && obj->GetDown()) // if this radius is 0 get children
+  {
+    BaseArray<BaseObject *> children;
+    BaseObject *child = obj->GetDown();
+    while (child)
+    {
+      children.Append(child) iferr_return;
+      child = child->GetNext();
+    }
+    GetCollectiveBBox(children, bbox);
+    return true;
+  }
+  Vector center = (obj->GetUpMg() * obj->GetRelPos()) + obj->GetMp();
+  bbox.Append(roundOffVector(center - rad)) iferr_return;
+  bbox.Append(roundOffVector(center + rad)) iferr_return;
   return true;
 }
 
@@ -232,6 +248,15 @@ Bool SubdivideGrid::GetCollectiveBBox(BaseArray<BaseObject *> &objects, BaseArra
   return true;
 }
 
+Vector SubdivideGrid::GetRadFromBBox(BaseArray<Vector> &bbox)
+{
+  Vector rad;
+  rad.x = Abs(bbox[1].x - bbox[0].x) / 2;
+  rad.y = Abs(bbox[1].y - bbox[0].y) / 2;
+  rad.z = Abs(bbox[1].z - bbox[0].z) / 2;
+  return rad;
+}
+
 Bool SubdivideGrid::GetCornersFromBBox(BaseArray<Vector> &bbox, WritableArrayInterface<Vector> &corners)
 {
   iferr_scope_handler { return false; };
@@ -246,20 +271,19 @@ Bool SubdivideGrid::GetCornersFromBBox(BaseArray<Vector> &bbox, WritableArrayInt
   return true;
 }
 
-Vector SubdivideGrid::MakesFarSides(BaseObject *spline, Vector *farCorner)
+VectorBool SubdivideGrid::MakesFarSides(BaseArray<Vector> &bbox, Vector *farCorner)
 {
-  Vector makesFarSides = Vector(0);
-  BaseArray<Vector> corners, bbox;
-  GetBBox(spline, bbox);
+  VectorBool makesFarSides;
+  BaseArray<Vector> corners;
   GetCornersFromBBox(bbox, corners);
   for (Int32 x = 0; x < corners.GetCount(); x++)
   {
     if (CompareFloatTolerant(corners[x].x, farCorner->x))
-      makesFarSides.x = 1;
+      makesFarSides.x = true;
     if (CompareFloatTolerant(corners[x].y, farCorner->y))
-      makesFarSides.y = 1;
+      makesFarSides.y = true;
     if (CompareFloatTolerant(corners[x].z, farCorner->z))
-      makesFarSides.z = 1;
+      makesFarSides.z = true;
   }
   return makesFarSides;
 }
@@ -298,7 +322,7 @@ EXECUTIONRESULT SubdivideGrid::Execute(BaseTag* tag, BaseDocument* doc, BaseObje
   
   // collect splines
   BaseArray<BaseObject *> splines;
-  for (Int x = 0; x < splineList->GetObjectCount(); x += 1)
+  for (Int32 x = 0; x < splineList->GetObjectCount(); x += 1)
   {
     splines.Append((BaseObject *)splineList->ObjectFromIndex(doc, x)) iferr_return;
   }
@@ -317,10 +341,8 @@ EXECUTIONRESULT SubdivideGrid::Execute(BaseTag* tag, BaseDocument* doc, BaseObje
     return EXECUTIONRESULT::OK;
 
   //  gather parent info so not to recalculate later
-  Vector parentRad = op->GetRad();
   Matrix parentMg = op->GetMg();
   Vector parentAnchor = parentMg.off;
-  Vector parentObjSpaceAnchor = (-op->GetMp()) + parentRad;
 
   BaseArray<Vector> parentBbox;
   SortedBBoxCorners parentCorners;
@@ -328,6 +350,8 @@ EXECUTIONRESULT SubdivideGrid::Execute(BaseTag* tag, BaseDocument* doc, BaseObje
   GetCollectiveBBox(splines, parentBbox);
   GetCornersFromBBox(parentBbox, parentCorners);
   Vector *parentFarCorner = parentCorners.GetLast();
+  Vector parentRad = GetRadFromBBox(parentBbox);
+  Vector parentObjSpaceAnchor = parentAnchor - parentBbox[0]; // Anchor in bbox space
 
   // calculate movements
   for (Int32 x = 0; x < splines.GetCount(); x++)
@@ -337,60 +361,55 @@ EXECUTIONRESULT SubdivideGrid::Execute(BaseTag* tag, BaseDocument* doc, BaseObje
     if (!spline->GetDeformMode()) // spline is disabled
       continue;
 
-    Vector splineRad = spline->GetRad();
-    Vector makesFarSides = MakesFarSides(spline, parentFarCorner);
+    BaseArray<Vector> splineBBox;
+    GetBBox(spline, splineBBox);
+    Vector splineRad = GetRadFromBBox(splineBBox);
+    VectorBool makesFarSides = MakesFarSides(splineBBox, parentFarCorner);
 
     // scale
-    Vector maxScaleOff(0.0001f); // cannot be 0 or else connect object freaks out
-    if (makesFarSides.x == 1)
-      if (splineRad.x != 0)
-        maxScaleOff.x = parentRad.x / splineRad.x;
-    if (makesFarSides.y == 1)
-      if (splineRad.y != 0)
-        maxScaleOff.y = parentRad.y / splineRad.y;
-    if (makesFarSides.z == 1)
-      if (splineRad.z != 0)
-        maxScaleOff.z = parentRad.z / splineRad.z;
+    Vector maxScaleOff(0.0_f);
+    if (makesFarSides.x && !CompareFloatTolerant(splineRad.x, 0.0_f))
+      maxScaleOff.x = parentRad.x / splineRad.x;
+    if (makesFarSides.y && !CompareFloatTolerant(splineRad.y, 0.0_f))
+      maxScaleOff.y = parentRad.y / splineRad.y;
+    if (makesFarSides.z && !CompareFloatTolerant(splineRad.z, 0.0_f))
+      maxScaleOff.z = parentRad.z / splineRad.z;
 
-    Vector scaleOff(1.0f);
-    scaleOff.x = MapRange(complete, 0.0f, 1.0f, maxScaleOff.x, 1.0f, splineX);
-    scaleOff.y = MapRange(complete, 0.0f, 1.0f, maxScaleOff.y, 1.0f, splineY);
-    scaleOff.z = MapRange(complete, 0.0f, 1.0f, maxScaleOff.z, 1.0f, splineZ);
+    Vector scaleOff(1.0_f);
+    scaleOff.x = MapRange(complete, 0.0_f, 1.0_f, maxScaleOff.x, 1.0_f, splineX);
+    scaleOff.y = MapRange(complete, 0.0_f, 1.0_f, maxScaleOff.y, 1.0_f, splineY);
+    scaleOff.z = MapRange(complete, 0.0_f, 1.0_f, maxScaleOff.z, 1.0_f, splineZ);
 
     // position
     Vector splineRelPos = spline->GetRelPos();
     Vector maxPosOff = -splineRelPos;
     Vector splineObjSpaceAnchor = (-spline->GetMp()) + splineRad;
-    if (makesFarSides.x == 1)
-      if (splineRad.x != 0)
-      {
-        Float origPosX = splineRelPos.x;
-        Float newSplineObjSpaceAnchorX = (splineObjSpaceAnchor.x / splineRad.x) * parentRad.x;
-        Float newPosX = newSplineObjSpaceAnchorX - parentObjSpaceAnchor.x;
-        maxPosOff.x = newPosX - origPosX;
-      }
-    if (makesFarSides.y == 1)
-      if (splineRad.y != 0)
-      {
-        Float origPosY = splineRelPos.y;
-        Float newSplineObjSpaceAnchorY = (splineObjSpaceAnchor.y / splineRad.y) * parentRad.y;
-        Float newPosY = newSplineObjSpaceAnchorY - parentObjSpaceAnchor.y;
-        maxPosOff.y = newPosY - origPosY;
-      }
-    if (makesFarSides.z == 1)
-      if (splineRad.z != 0)
-      {
-        Float origPosZ = splineRelPos.z;
-        Float newSplineObjSpaceAnchorZ = (splineObjSpaceAnchor.z / splineRad.z) * parentRad.z;
-        Float newPosZ = newSplineObjSpaceAnchorZ - parentObjSpaceAnchor.z;
-        maxPosOff.z = newPosZ - origPosZ;
-      }
-
+    if (makesFarSides.x && !CompareFloatTolerant(splineRad.x, 0.0_f))
+    {
+      Float origPosX = splineRelPos.x;
+      Float newSplineObjSpaceAnchorX = (splineObjSpaceAnchor.x / splineRad.x) * parentRad.x;
+      Float newPosX = newSplineObjSpaceAnchorX - parentObjSpaceAnchor.x;
+      maxPosOff.x = newPosX - origPosX;
+    }
+    if (makesFarSides.y && !CompareFloatTolerant(splineRad.y, 0.0_f))
+    {
+      Float origPosY = splineRelPos.y;
+      Float newSplineObjSpaceAnchorY = (splineObjSpaceAnchor.y / splineRad.y) * parentRad.y;
+      Float newPosY = newSplineObjSpaceAnchorY - parentObjSpaceAnchor.y;
+      maxPosOff.y = newPosY - origPosY;
+    }
+    if (makesFarSides.z && !CompareFloatTolerant(splineRad.z, 0.0_f))
+    {
+      Float origPosZ = splineRelPos.z;
+      Float newSplineObjSpaceAnchorZ = (splineObjSpaceAnchor.z / splineRad.z) * parentRad.z;
+      Float newPosZ = newSplineObjSpaceAnchorZ - parentObjSpaceAnchor.z;
+      maxPosOff.z = newPosZ - origPosZ;
+    }
 
     Vector posOff(0);
-    posOff.x = MapRange(complete, 0.0f, 1.0f, maxPosOff.x, 0.0f, splineX);
-    posOff.y = MapRange(complete, 0.0f, 1.0f, maxPosOff.y, 0.0f, splineY);
-    posOff.z = MapRange(complete, 0.0f, 1.0f, maxPosOff.z, 0.0f, splineZ);
+    posOff.x = MapRange(complete, 0.0_f, 1.0_f, maxPosOff.x, 0.0_f, splineX);
+    posOff.y = MapRange(complete, 0.0_f, 1.0_f, maxPosOff.y, 0.0_f, splineY);
+    posOff.z = MapRange(complete, 0.0_f, 1.0_f, maxPosOff.z, 0.0_f, splineZ);
 
     // apply
     spline->SetFrozenPos(posOff);

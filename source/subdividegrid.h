@@ -17,6 +17,25 @@ enum {
 
 namespace maxon
 {
+
+struct VectorBool
+{
+  Bool x, y, z;
+  VectorBool()
+  {
+    x = false;
+    y = false;
+    z = false;
+  }
+  inline String Printable() {
+    return("{"_s +
+           " x:"_s + (x ? "true"_s : "false"_s) +
+           " y:"_s + (y ? "true"_s : "false"_s) +
+           " z:"_s + (z ? "true"_s : "false"_s) +
+           " }"_s);
+  };
+};
+
 struct SortedBBoxCorners : public SortedArray<SortedBBoxCorners, BaseArray<Vector>>
 {
   static Vector anchor;
@@ -29,14 +48,16 @@ Vector SortedBBoxCorners::anchor = { Vector(0) };
 class SubdivideGrid : public TagData {
 private:
   Bool GetBBox(BaseObject *object, BaseArray<Vector> &bbox);
+  Vector GetRadFromBBox(BaseArray<Vector> &bbox);
   Bool GetCollectiveBBox(BaseArray<BaseObject *> &objects, BaseArray<Vector> &bbox);
   Bool GetCornersFromBBox(BaseArray<Vector> &bbox, WritableArrayInterface<Vector> &corners);
-  Vector MakesFarSides(BaseObject *spline, Vector *farCorner);
+  VectorBool MakesFarSides(BaseArray<Vector> &bbox, Vector *farCorner);
+  Vector GetPosInBBox(Vector pos, BaseArray<Vector> &bbox);
 public:
   virtual Bool Init(GeListNode* node);
+  virtual Bool GetDDescription(GeListNode* node, Description* description, DESCFLAGS_DESC& flags);
   virtual Bool Message(GeListNode *node, Int32 type, void *data);
   virtual EXECUTIONRESULT Execute(BaseTag* tag, BaseDocument* doc, BaseObject* op, BaseThread* bt, Int32 priority, EXECUTIONFLAGS flags);
-  virtual Bool GetDDescription(GeListNode* node, Description* description, DESCFLAGS_DESC& flags);
   static NodeData* Alloc() { return NewObjClear(SubdivideGrid); }
 };
 }
